@@ -1,0 +1,9 @@
+{
+  "name": "@weaverbird/wb-cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "wb-cli": "./src/main.ts"
+  }
+}

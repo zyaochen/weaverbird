@@ -1,0 +1,8 @@
+# weaverbird-v2/captain.toml
+# 仓库根版本（git tracked）；不含隐私字段（home_group_id 写本机 override）
+# 本机 override: ~/.weaverbird/captain.toml
+
+[[mapping]]
+git_remote    = ".*github\\.com.*/weaverbird.*"
+cwd_prefix    = "/Users/me/code/weaverbird"
+captain_id    = "captain-local-default"

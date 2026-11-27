@@ -1,0 +1,15 @@
+{
+  "runId": "run-im",
+  "botId": "bot-1",
+  "agentId": "claude-code",
+  "userOpenId": "ou_user_xyz",
+  "threadId": "om_thread_abc",
+  "sourceMessageId": "om_msg_x",
+  "replyMessageId": "om_msg_y",
+  "cwd": "/tmp/proj",
+  "model": "sonnet-4",
+  "consentLevel": "normal",
+  "startedAt": "2026-06-04T09:00:00.000Z",
+  "schemaVersion": 1,
+  "host": "local"
+}

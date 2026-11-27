@@ -1,0 +1,38 @@
+node_modules/
+dist/
+reviews/hourly/*
+!reviews/hourly/.gitkeep
+reviews/control/dashboard.json
+reviews/control/notification-outbox.md
+reviews/control/merge-request.json
+.DS_Store
+
+# IDE / editor local state
+.claude/
+.cursor/
+
+# wb-bot operator-local .env (kept out of git; see apps/wb-bot/.env.example)
+apps/wb-bot/.env
+
+# audit-pipe e2e fixture configs · 防 implementer 把含真 app_secret 的 config
+# 复制进 tests/audit-pipe/*/fixtures/ 时误 commit (W3.1/F17 红线 16)
+tests/**/fixtures/**/config*.json
+.weaverbird/config.json
+
+# harness local replay / evidence artifacts
+.tmp-gs-xref-check/
+harness/ledger.ndjson
+harness/escalation/
+harness/doc-ready-agent.ts
+harness/f8-group-sync-agent.ts
+harness/h4-batch-agent.ts
+harness/run-f8.ts
+
+# wb-bot / approval-gate operator-local runtime (WB_DATA_DIR=repo-root)
+wb-bot.db
+wb-bot.db-journal
+wb-bot.db-shm
+wb-bot.db-wal
+/logs/
+/runs/
+/approval-gate/

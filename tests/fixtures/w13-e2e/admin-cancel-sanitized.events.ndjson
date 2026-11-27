@@ -1,0 +1,5 @@
+{"type":"system","cwd":"/tmp/w13-fixture","model":"fixture-model","continuationToken":"resume_fixture_1","schemaVersion":1}
+{"type":"text","delta":"Admin cancel flow is ready for replay.","schemaVersion":1}
+{"type":"tool_use","id":"tool_fixture_1","name":"Read","input":{"file_path":"README.md"},"schemaVersion":1}
+{"type":"tool_result","id":"tool_fixture_1","output":"fixture replay ok","isError":false,"schemaVersion":1}
+{"type":"done","continuationToken":"resume_fixture_2","schemaVersion":1}

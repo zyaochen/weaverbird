@@ -1,0 +1,19 @@
+{
+  "name": "@weaverbird/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./audit-pipe": "./src/audit-pipe/index.ts",
+    "./run-registry": "./src/run-registry/index.ts",
+    "./captain": "./src/captain/index.ts",
+    "./calendar-hook": "./src/calendar-hook/index.ts",
+    "./periodic-tasks": "./src/periodic-tasks/index.ts"
+  },
+  "bin": {
+    "wb-runner": "./dist/runner/wb-runner-main.js",
+    "audit-pipe": "./dist/audit-pipe/audit-pipe-main.js",
+    "run-registry": "./dist/run-registry/run-registry-main.js"
+  }
+}

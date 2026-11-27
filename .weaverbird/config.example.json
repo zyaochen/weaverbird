@@ -1,0 +1,10 @@
+{
+  "audit": {
+    "enabled": true,
+    "bitable_base_id": { "type": "literal", "value": "<your_base_id>" },
+    "bitable_table_id": { "type": "literal", "value": "<your_table_id>" },
+    "app_id": { "type": "literal", "value": "<your_app_id>" },
+    "app_secret": { "type": "literal", "value": "<your_app_secret>" },
+    "lark_domain": "https://open.larkoffice.com"
+  }
+}

@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+Install:
+  sed -e "s|__PROJECT_ROOT__|$(pwd)|g" -e "s|__HOME__|$HOME|g" \
+    scripts/com.weaverbird.wb-bot-multi.plist.template \
+    > ~/Library/LaunchAgents/com.weaverbird.wb-bot-multi.plist
+  mkdir -p ~/.weaverbird/logs/_orchestrator
+  launchctl load ~/Library/LaunchAgents/com.weaverbird.wb-bot-multi.plist
+  launchctl list | grep wb-bot-multi
+
+Uninstall:
+  launchctl unload ~/Library/LaunchAgents/com.weaverbird.wb-bot-multi.plist
+  rm ~/Library/LaunchAgents/com.weaverbird.wb-bot-multi.plist
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.weaverbird.wb-bot-multi</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/node</string>
+    <string>__PROJECT_ROOT__/dist/apps/wb-bot/src/multi/main.js</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__PROJECT_ROOT__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>NODE_ENV</key>
+    <string>production</string>
+    <key>WB_CONFIG_DIR</key>
+    <string>__HOME__/.weaverbird/configs</string>
+    <key>WB_DATA_DIR</key>
+    <string>__HOME__/.weaverbird</string>
+    <key>PATH</key>
+    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+    <key>Crashed</key>
+    <true/>
+  </dict>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/.weaverbird/logs/_orchestrator/wb-bot-multi.stdout.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.weaverbird/logs/_orchestrator/wb-bot-multi.stderr.log</string>
+
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+</dict>
+</plist>

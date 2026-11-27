@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+Install:
+  sed -e "s|__PROJECT_ROOT__|$(pwd)|g" -e "s|__HOME__|$HOME|g" \
+    scripts/com.weaverbird.audit-pipe.plist.template \
+    > ~/Library/LaunchAgents/com.weaverbird.audit-pipe.plist
+  mkdir -p ~/.weaverbird/logs/_audit-pipe
+  launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.weaverbird.audit-pipe.plist
+  launchctl list | grep audit-pipe
+
+Uninstall:
+  launchctl bootout gui/$UID ~/Library/LaunchAgents/com.weaverbird.audit-pipe.plist
+  rm ~/Library/LaunchAgents/com.weaverbird.audit-pipe.plist
+
+Node path:
+  ProgramArguments[0] defaults to /opt/homebrew/bin/node.
+  If your node binary lives elsewhere (for example /usr/local/bin/node), edit the template before install.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.weaverbird.audit-pipe</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>__PROJECT_ROOT__/dist/packages/core/src/audit-pipe/audit-pipe-main.js</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__PROJECT_ROOT__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>NODE_ENV</key>
+    <string>production</string>
+    <key>WB_DATA_DIR</key>
+    <string>__HOME__/.weaverbird</string>
+    <key>PATH</key>
+    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+    <key>Crashed</key>
+    <true/>
+  </dict>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/.weaverbird/logs/_audit-pipe/audit-pipe.stdout.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.weaverbird/logs/_audit-pipe/audit-pipe.stderr.log</string>
+
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+</dict>
+</plist>

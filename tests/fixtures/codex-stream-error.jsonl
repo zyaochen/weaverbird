@@ -1,0 +1,2 @@
+{"type":"thread.started","thread_id":"codex-session-err"}
+{"type":"error","message":"unexpected status 401 Unauthorized"}
