@@ -389,3 +389,7 @@ This README only promises **implemented code / test-surface behavior**. Real IM 
 - implicit “stop the latest active task” targets: **out of scope**
 - turning Weaverbird into an external SDK / framework: **out of scope**
 - claiming real IM / real group / real button E2E as completed: **out of scope**
+
+## License
+
+MIT, see [LICENSE](LICENSE).

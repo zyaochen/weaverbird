@@ -390,3 +390,7 @@ README 只承诺 **代码 / 测试层面的已落地行为**。真实 IM / 真�
 - 隐式“停最新活跃”目标：**不做**
 - 把 Weaverbird 写成对外 SDK / framework：**不做**
 - 把真实 IM / 真群 / 真按钮 e2e 写成已完成：**不做**
+
+## 许可
+
+MIT，见 [LICENSE](LICENSE)。
