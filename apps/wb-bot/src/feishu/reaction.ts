@@ -1,4 +1,5 @@
 import pino from 'pino';
+import { errorSerializers } from './log-redact.js';
 
 /**
  * 收到消息即在原消息上打一个「敲键盘」(Typing) 表情, run 结束后撤掉.
@@ -14,7 +15,7 @@ export type ReactionClient = {
   removeReaction?(messageId: string, reactionId: string): Promise<void>;
 };
 
-const logger = pino({ level: process.env['LOG_LEVEL'] ?? 'info' });
+const logger = pino({ level: process.env['LOG_LEVEL'] ?? 'info', serializers: errorSerializers });
 
 export class AckReactions {
   private readonly pending = new Map<string, Promise<string | undefined>>();

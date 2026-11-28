@@ -11,6 +11,7 @@ import {
 } from '../../../packages/core/src/index.js';
 import { isCommandOnPath } from '../../../packages/core/src/agent/registry.js';
 import { buildClaudeAgentEnv, shouldPreferClaudeOAuth } from './security/env-whitelist.js';
+import { extractModelFromArgs, stripModelArgs } from './feishu/event-handler.js';
 
 type ClaudeAuthStatus = {
   loggedIn?: boolean;
@@ -22,6 +23,16 @@ type BotRegistryOptions = {
   claudeCommand: string;
   codexCommand: string;
 };
+
+/**
+ * `WB_CLAUDE_COMMAND="claude-w --model X"` 这类带参数的写法: 第一个词是可执行文件, 其余前置到 argv.
+ * 与 wb-runner 路径 (event-handler) 的拆分规则一致; 不拆的话可用性检查找不到 `claude-w --model X`
+ * 这个文件, 所有 agent 都被判为不可用.
+ */
+function splitCommand(command: string): { head: string; prepend: string[] } {
+  const [head, ...prepend] = command.trim().split(/\s+/);
+  return { head: head ?? command, prepend };
+}
 
 function commandExists(command: string): boolean {
   return command.includes('/') ? existsSync(command) : isCommandOnPath(command);
@@ -115,12 +126,15 @@ function syncCodexHome(sourceDir: string, targetDir: string): void {
 
 class OAuthFirstClaudeCodeAgent extends ClaudeCodeAgent {
   private preferOAuth?: boolean;
+  private readonly command: string;
+  private readonly prepend: string[];
 
   constructor(
-    private readonly command: string,
+    command: string,
     private readonly authStatusSupported: boolean,
   ) {
     super();
+    ({ head: this.command, prepend: this.prepend } = splitCommand(command));
   }
 
   override async isAvailable(): Promise<boolean> {
@@ -134,9 +148,12 @@ class OAuthFirstClaudeCodeAgent extends ClaudeCodeAgent {
     // claude-w skips interactive model selection only when --model is in $@.
     // If ANTHROPIC_MODEL env is set and no explicit model was requested,
     // inject it so the wrapper sees the flag and skips the TTY picker.
-    const effectiveModel = req.model ?? process.env['ANTHROPIC_MODEL'];
+    // A model written into the command itself is moved into the single --model slot.
+    const commandModel = extractModelFromArgs(this.prepend);
+    const prepend = commandModel ? stripModelArgs(this.prepend) : this.prepend;
+    const effectiveModel = req.model ?? commandModel ?? process.env['ANTHROPIC_MODEL'];
     const spec = super.buildProcessSpec({ ...req, model: effectiveModel });
-    return { ...spec, command: this.command };
+    return { ...spec, command: this.command, args: [...prepend, ...spec.args] };
   }
 
   protected override envFilter(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -148,12 +165,15 @@ class OAuthFirstClaudeCodeAgent extends ClaudeCodeAgent {
 
 class ConfigurableCodexAgent extends CodexAgent {
   private readonly isolatedCodexHome: string;
+  private readonly command: string;
+  private readonly prepend: string[];
 
   constructor(
-    private readonly command: string,
+    command: string,
     dataDir: string,
   ) {
     super();
+    ({ head: this.command, prepend: this.prepend } = splitCommand(command));
     this.isolatedCodexHome = join(dataDir, 'wb-bot-codex-home');
   }
 
@@ -167,11 +187,14 @@ class ConfigurableCodexAgent extends CodexAgent {
   protected override buildProcessSpec(req: RunRequest) {
     // codex-w skips interactive model selection only when -c model=... is in $@.
     // Fall back to CODEX_MODEL env so the wrapper sees the flag and skips the TTY picker.
-    const effectiveModel = req.model ?? (this.command !== 'codex' ? process.env['CODEX_MODEL'] : undefined);
+    // `--model X` written into the command goes through the same slot; `-c model=X` stays in prepend.
+    const commandModel = extractModelFromArgs(this.prepend);
+    const prepend = commandModel ? stripModelArgs(this.prepend) : this.prepend;
+    const effectiveModel = req.model ?? commandModel ?? (this.command !== 'codex' ? process.env['CODEX_MODEL'] : undefined);
     const spec = super.buildProcessSpec({ ...req, model: effectiveModel });
-    if (!effectiveModel || this.command === 'codex') return { ...spec, command: this.command };
+    if (!effectiveModel || this.command === 'codex') return { ...spec, command: this.command, args: [...prepend, ...spec.args] };
     const args = spec.args.filter((arg, index, source) => arg !== '--model' && source[index - 1] !== '--model');
-    return { ...spec, command: this.command, args: ['-c', `model=${effectiveModel}`, ...args] };
+    return { ...spec, command: this.command, args: [...prepend, '-c', `model=${effectiveModel}`, ...args] };
   }
 
   protected override envFilter(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -190,7 +213,7 @@ export function createBotAgentRegistry(options: BotRegistryOptions): AgentRegist
     {
       agent: new OAuthFirstClaudeCodeAgent(
         options.claudeCommand,
-        supportsAuthStatus(options.claudeCommand),
+        supportsAuthStatus(splitCommand(options.claudeCommand).head),
       ),
     },
     { agent: new ConfigurableCodexAgent(options.codexCommand, options.dataDir) },

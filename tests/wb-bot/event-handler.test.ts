@@ -195,6 +195,22 @@ describe('event handler', () => {
     }
   });
 
+  it('replies with an error card instead of dropping the message when no agent is available', async () => {
+    const replies: Array<Record<string, unknown>> = [];
+    const unavailable = { ...mkTestAgent('claude-code', 'Claude Code'), async isAvailable() { return false; } };
+    const registry = new DefaultAgentRegistry([{ agent: unavailable, command: 'claude' }]);
+    const handler = new EventHandler(registry, store, {
+      async replyCard(_messageId, card) { replies.push(card); return 'reply-1'; },
+      async updateCard() {},
+      async replyText() { return 'msg-1'; },
+    });
+
+    await handler.handleMessage({ eventId: 'evt-no-agent', userOpenId: 'u1', threadId: 't1', messageId: 'm1', text: 'hello' });
+
+    expect(replies).toHaveLength(1);
+    expect(JSON.stringify(replies[0])).toContain('没有可用的 agent');
+  });
+
   it('resolves default agent via isAvailable() when no thread binding exists', async () => {
     const testCwd = mkTmpDir();
     const requests: RunRequest[] = [];
@@ -928,6 +944,120 @@ describe('event handler', () => {
     await vi.waitFor(() => expect(prompts).toHaveLength(2));
     expect(prompts[1]).toBe('second task\n\nthird task');
     await vi.waitFor(() => expect(JSON.stringify(updatedCards.map((u) => u.card))).toContain('已合并 2 条排队消息开始处理'));
+
+    await handler.stopAllSessions(500);
+    rmSync(testCwd, { recursive: true, force: true });
+  });
+
+  it('queues a message that arrives while the previous run card is still being created', async () => {
+    const testCwd = mkTmpDir();
+    store.setCurrentCwd('default', 'u1', 't1', testCwd);
+    const resolvers: Array<() => void> = [];
+    const prompts: string[] = [];
+    let releaseFirstCard!: () => void;
+    const firstCardGate = new Promise<void>((resolve) => { releaseFirstCard = resolve; });
+    let replySeq = 0;
+    const replyCard = vi.fn(async (_msgId: string, card: Record<string, unknown>) => {
+      const seq = ++replySeq;
+      if (seq === 1) await firstCardGate; // CardKit create + reply takes seconds in real life
+      return `reply-${seq}`;
+    });
+    const registry: AgentRegistry = {
+      register() {},
+      lookup() {
+        return {
+          id: 'claude-code',
+          displayName: 'Claude Code',
+          async isAvailable() { return true; },
+          async getCapabilities() { return new ClaudeCodeAgent().getCapabilities(); },
+          run(req: RunRequest): AgentRun {
+            prompts.push(req.prompt);
+            let resolveRun!: () => void;
+            const done = new Promise<void>((resolve) => { resolveRun = resolve; });
+            resolvers.push(resolveRun);
+            return {
+              events: { async *[Symbol.asyncIterator]() { await done; yield { type: 'done' } as const; } },
+              async stop() { resolveRun(); },
+              async waitForExit() { return true; },
+            };
+          },
+        };
+      },
+      list() { return []; },
+      async isAvailable() { return true; },
+    };
+    const handler = new EventHandler(registry, store, { replyCard, async updateCard() {}, async replyText() { return 'msg-1'; } });
+
+    const first = handler.handleMessage({ eventId: 'evt-a', userOpenId: 'u1', threadId: 't1', messageId: 'm1', text: '列出当前目录' });
+    await vi.waitFor(() => expect(replyCard).toHaveBeenCalledTimes(1));
+    await handler.handleMessage({ eventId: 'evt-b', userOpenId: 'u1', threadId: 't1', messageId: 'm2', text: '再统计一下文件数' });
+    expect(JSON.stringify(replyCard.mock.calls[1]?.[1])).toContain('已排队');
+
+    releaseFirstCard();
+    await vi.waitFor(() => expect(resolvers).toHaveLength(1));
+    expect(prompts).toEqual(['列出当前目录']);
+    resolvers[0]!();
+    await first;
+    await vi.waitFor(() => expect(prompts).toEqual(['列出当前目录', '再统计一下文件数']));
+
+    await handler.stopAllSessions(500);
+    rmSync(testCwd, { recursive: true, force: true });
+  });
+
+  it('skips a queued message that was withdrawn before its turn and runs the rest', async () => {
+    const testCwd = mkTmpDir();
+    store.setCurrentCwd('default', 'u1', 't1', testCwd);
+    const resolvers: Array<() => void> = [];
+    const prompts: string[] = [];
+    const updates: Array<{ messageId: string; card: Record<string, unknown> }> = [];
+    const repliesTo = new Map<string, number>();
+    let replySeq = 0;
+    const replyCard = vi.fn(async (messageId: string) => {
+      const count = (repliesTo.get(messageId) ?? 0) + 1;
+      repliesTo.set(messageId, count);
+      // m3 is recalled after its queue notice went out; replying to it again fails like Feishu does.
+      if (messageId === 'm3' && count > 1) throw Object.assign(new Error('Request failed with status code 400'), { response: { status: 400, data: { code: 230011, msg: 'The message was withdrawn.' } } });
+      return `reply-${++replySeq}`;
+    });
+    const registry: AgentRegistry = {
+      register() {},
+      lookup() {
+        return {
+          id: 'claude-code',
+          displayName: 'Claude Code',
+          async isAvailable() { return true; },
+          async getCapabilities() { return new ClaudeCodeAgent().getCapabilities(); },
+          run(req: RunRequest): AgentRun {
+            prompts.push(req.prompt);
+            let resolveRun!: () => void;
+            const done = new Promise<void>((resolve) => { resolveRun = resolve; });
+            resolvers.push(resolveRun);
+            return {
+              events: { async *[Symbol.asyncIterator]() { await done; yield { type: 'done' } as const; } },
+              async stop() { resolveRun(); },
+              async waitForExit() { return true; },
+            };
+          },
+        };
+      },
+      list() { return []; },
+      async isAvailable() { return true; },
+    };
+    const handler = new EventHandler(registry, store, {
+      replyCard,
+      async updateCard(messageId, card) { updates.push({ messageId, card }); },
+      async replyText() { return 'msg-1'; },
+    });
+
+    const first = handler.handleMessage({ eventId: 'e1', userOpenId: 'u1', threadId: 't1', messageId: 'm1', text: 'first' });
+    await vi.waitFor(() => expect(resolvers).toHaveLength(1));
+    await handler.handleMessage({ eventId: 'e2', userOpenId: 'u1', threadId: 't1', messageId: 'm2', text: 'second' });
+    await handler.handleMessage({ eventId: 'e3', userOpenId: 'u1', threadId: 't1', messageId: 'm3', text: 'third (recalled)' });
+
+    resolvers[0]!();
+    await first;
+    await vi.waitFor(() => expect(prompts).toEqual(['first', 'second']));
+    await vi.waitFor(() => expect(JSON.stringify(updates.map((u) => u.card))).toContain('消息已撤回'));
 
     await handler.stopAllSessions(500);
     rmSync(testCwd, { recursive: true, force: true });

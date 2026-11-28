@@ -168,6 +168,26 @@ describe('card renderer', () => {
     expect(stoppedWithError.header.title.content).not.toContain('🔴 error');
     expect(restartCard.header.title.content).toContain('🔴 error');
   });
+
+  it('does not repeat the error when the answer text already ends with it', () => {
+    const message = 'API Error: The socket connection was closed unexpectedly.';
+    const echoed = JSON.stringify((renderCard({
+      ...createInitialState('claude-code', 'Claude Code', 'Claude Code'),
+      text: message,
+      terminalState: 'error',
+      errorMessage: message,
+    }) as { body: unknown }).body);
+    expect(echoed.split('socket connection was closed').length - 1).toBe(1);
+    expect(echoed).not.toContain('**Error**');
+
+    const separate = JSON.stringify(renderCard({
+      ...createInitialState('claude-code', 'Claude Code', 'Claude Code'),
+      text: '读完了 12 个文件',
+      terminalState: 'error',
+      errorMessage: 'child exited with code 1',
+    }));
+    expect(separate).toContain('**Error**');
+  });
 });
 
 describe('long answers', () => {

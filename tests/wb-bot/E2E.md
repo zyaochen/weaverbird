@@ -21,7 +21,7 @@
   - 前置文件检查: `~/.weaverbird/<dataDir>/approval-gate/codex-home/config.toml` 存在但运行时**不生效** (codex 带 `--ignore-user-config`); 真实 hooks/model/model_providers 来自 `-c` argv。
   - 用 `/agent codex` 触发一个无副作用的 prompt (如 `echo hello`), 确认:
     - codex 正常起跳 (`thread.started`), 不报 flag/TOML 解析错误 → `-c` 配置被接受。
-    - codex `--dangerously-bypass-hook-trust` 启动告警被 `isIgnorableItemError` 吞掉, 卡片不显示假错误。
+    - codex `--dangerously-bypass-hook-trust` 启动告警是 item 级 error, `mapCodexStreamEvent` 不把它当失败, 卡片不显示假错误。
     - approval-gate wrapper hook 真实执行 (查看 `approval-gate/hooks/approval-gate-hook.sh` 被调用, 可在 `approval-gate/` 目录看审批请求落地)。
   - 自动化回归: `npm run test:e2e -- tests/codex.e2e.test.ts` 的 "boots a real codex exec with approval-gate runtime args" 用例覆盖配置解析正确性 (无可用 codex 时自动 skip)。
 
@@ -627,3 +627,45 @@ codex             · agents=[...] · 在线 ✓
 | D29 | 云文档评论 | 在 docx 选中一段文字评论「@bot 这段对吗」；再对整篇评论 @bot | 评论上出现 Typing 表情，答案以纯文本回在线程里（无 `**` / `#`）；整篇评论另起一条评论回复；bot 自己的回复不会再触发 |
 
 **保活**（可选）：笔记本合盖 5 分钟再打开，`/health` 的 WSClient 一行在 1 分钟内回到 `connected`；日志可见 `keepalive detected wake-up`，若 SDK 卡住则有 `feishu ws stuck, rebuilding client`。
+
+### D16-D29 实测记录 (2026-11-27 ~ 11-28)
+
+环境：本机 `npm run wb-bot:dev`（wb-runner 路径，`WB_DEFAULT_CWD=/tmp/wb-e2e`），claude-code 走 `claude-w --model gpt-5.4`；飞书 PC + 手机，DM、普通群、普通群内话题。
+
+| # | 结果 | 说明 |
+|---|---|---|
+| D16 | ✅ | 图片 + 富文本都进到 agent 输入 |
+| D17 | ⚠️ 部分 | 合并转发 ✅（发送人显示为 open_id，要换成姓名需 contact 权限）；富文本由 D16 覆盖；`.log` 文件输入未测 |
+| D18 | ✅ | 由 D17 的引用回复覆盖 |
+| D19 | ✅ | Typing 表情出现并在结束后移除 |
+| D20 | ⚠️ 部分 | 合并、排队、结束后自动接着跑 ✅；撤回未测：应用未订阅 `im.message.recalled_v1`（后台名「撤回消息」，需 `im:message` 或 `im:message:readonly`） |
+| D21 | ✅ | 4419 字回答 25s 内分 29 次刷新；按 0.3-0.8s 一段增长，不是逐字 |
+| D22 | ✅ | 35 个工具折叠，失败面板红框 |
+| D23 | ✅ | 23605 字符拆成 2 张卡，两张卡的代码块都闭合 |
+| D24 | ✅ | 运行 13m49s；第 9m59s 飞书关流式，日志 `cardkit streaming closed, re-enabling` 后继续更新 |
+| D25 | ✅ | `kill -9` 后 23s 重启，`run resumed after restart`，后两轮续写到原卡，无 sequence 报错 |
+| D26 | ✅ | `WB_CARD_STREAMING=0` 走整卡 patch，按钮与用量都在 |
+| D27 | ⚠️ 部分 | 普通群内话题 ✅（回复带同一 thread_id）；主时间线消息按普通回复 ✅；整群话题模式（chat_mode=topic）未测：bot 不在该群 |
+| D28 | ⚠️ 部分 | 发起人点击后图片 / 文件消息都发出 ✅；非发起人点击被拒未测（需要第二个人）；手机端两个按钮文字被截成「发送 ...」 |
+| D29 | ⏭ 未测 | 未订阅 `drive.notice.comment_add_v1` |
+| 保活 | ✅ | 合盖唤醒后 `feishu ws not connected → reconnected → recovered`，随后的消息正常处理 |
+| 告警卡二次转发 | ✅ | 转发的告警卡标题、时间、概述、时间线都读到 |
+
+实测中发现并修复（均在本分支）：
+
+- `b794072` 命令串带参数（`claude-w --model …`）时被判不可用、无任何回复 → 拆分命令头；无可用 agent 时回错误卡
+- `56979b8` wb-runner 路径没有翻译原始 CLI 输出，结束卡空白、上下文丢失；codex 0.142 的非致命 error item 被当成失败
+- `63ff8c1` 转发的卡片只显示 `[interactive card]`；部分文本消息带 `<p>` 包裹
+- `e72413b` run 启动窗口内到达的消息会再起一个并发 run
+- `9b36b86` 排队消息被撤回后合并失败（230011）；错误日志里带了 tenant token
+- `469aed9` 答案末尾已是错误信息时卡片重复显示
+- `953e4df` claude 正文整段一次出现 → `--include-partial-messages` 增量映射
+- `abf370e` 重启接管后耗时从重启时刻算，长任务不发完成推送
+- `f0c1d3b` 只在正文里写 `` `chart.png` `` 的产物识别不到
+- `05186bc` 同一张卡的第二个「发送」按钮被当成重复点击（卡片回调没有 event_id）
+
+已知未修：
+
+- 重启接管的 run 结束时 `meta.json` 仍是 `active`（`status` 文件正确；目前没有读者依赖它）
+- bot 重启后，旧卡上的「重试」「发送」按钮失效（上下文只在内存里），会提示重新发消息
+- 手机端产物按钮文字截断

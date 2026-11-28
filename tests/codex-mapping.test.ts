@@ -21,6 +21,15 @@ describe('codex mapping', () => {
     ]);
   });
 
+  it('maps a codex 0.142 exec stream: item-level warnings are not fatal, agent_message text lives in item.text', () => {
+    expect(loadFixture('codex-stream-0142.jsonl')).toEqual([
+      { type: 'system', continuationToken: '00000000-0000-4000-8000-000000000142', cwd: '/tmp/project', model: undefined },
+      { type: 'text', delta: 'ok' },
+      { type: 'usage', inputTokens: 19203, outputTokens: 5 },
+      { type: 'done', continuationToken: undefined },
+    ]);
+  });
+
   it('maps error streams into auth errors', () => {
     expect(loadFixture('codex-stream-error.jsonl')).toEqual([
       { type: 'system', continuationToken: 'codex-session-err', cwd: '/tmp/project', model: undefined },

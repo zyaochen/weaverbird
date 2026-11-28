@@ -171,6 +171,44 @@ describe('F6 recovery wiring', () => {
     rmSync(dataDir, { recursive: true, force: true });
   });
 
+  it('reattached run keeps the original start time for the elapsed clock and the completion push', async () => {
+    const agent = mkAgentWithRotation('claude-code', 'Claude Code', 'rotating');
+    const registry = new DefaultAgentRegistry([{ agent, command: 'claude' }]);
+    const dataDir = mkdtempSync(join(tmpdir(), 'wb-data-'));
+    const botId = 'default';
+    const runId = 'run-resume-start-001';
+    const runDir = join(dataDir, 'runs', botId, runId);
+    mkdirSync(runDir, { recursive: true });
+    const startedAt = Date.now() - 10 * 60_000;
+
+    writeFileSync(join(runDir, 'spec.json'), JSON.stringify({ agentId: 'claude-code', prompt: 'hi', startedAt: new Date(startedAt).toISOString() }));
+    writeFileSync(join(runDir, 'status'), 'running');
+    writeFileSync(join(runDir, 'heartbeat'), String(Math.floor(Date.now() / 1000)));
+    writeFileSync(join(runDir, 'events.ndjson'), '{"type":"text","delta":"answer"}\n{"type":"done"}\n');
+    store.upsertInflightCard('default', {
+      sourceMessageId: 'src-5',
+      replyMessageId: 'reply-5',
+      userOpenId: 'u5',
+      threadId: 't5',
+      runId,
+      agentId: 'claude-code',
+    });
+
+    const replyText = vi.fn(async () => 'msg-1');
+    const handler = new EventHandler(registry, store, {
+      async replyCard() { return 'reply-x'; },
+      async updateCard() {},
+      replyText,
+    }, '/tmp', undefined, { dataDir, wbRunnerMainPath: '/dev/null', botId });
+
+    await handler.recoverInflightCards();
+    await vi.waitFor(() => expect(replyText).toHaveBeenCalledTimes(1), { timeout: 3000 });
+    const [replyTo, message] = replyText.mock.calls[0] as unknown as [string, string];
+    expect(replyTo).toBe('reply-5');
+    expect(message).toMatch(/ · 10m(\d+s)? · /);
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
   it('F6.2.5: rotating agent + spec.json missing → no crash, no upsert', async () => {
     const agent = mkAgentWithRotation('claude-code', 'Claude Code', 'rotating');
     const registry = new DefaultAgentRegistry([{ agent, command: 'claude' }]);

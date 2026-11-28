@@ -57,6 +57,41 @@ function legacyText(content: string): string {
   }
 }
 
+const INTERACTIVE_PLACEHOLDER = '[interactive card]';
+
+type CardInline = { tag?: string; text?: string; href?: string; user_name?: string };
+
+/**
+ * 飞书推给 bot 的卡片消息 (含转发来的告警卡) 是简化格式 `{ title, elements: [[{tag,text,href}]] }`,
+ * SDK 只给 `[interactive card]` 占位; 这里按行拼出标题和文字, 链接保留地址.
+ */
+export function interactiveText(content: string): string {
+  let parsed: { title?: unknown; elements?: unknown };
+  try {
+    parsed = JSON.parse(content) as typeof parsed;
+  } catch {
+    return '';
+  }
+  const lines: string[] = [];
+  if (typeof parsed.title === 'string' && parsed.title.trim()) lines.push(parsed.title.trim());
+  for (const row of Array.isArray(parsed.elements) ? parsed.elements : []) {
+    if (!Array.isArray(row)) continue;
+    const line = (row as CardInline[]).map((item) => {
+      if (item.tag === 'a') return item.href ? `${item.text ?? ''} (${item.href})` : item.text ?? '';
+      if (item.tag === 'at') return `@${item.user_name ?? item.text ?? ''}`;
+      return item.tag === 'text' ? item.text ?? '' : '';
+    }).join('').trim();
+    if (line) lines.push(line);
+  }
+  return lines.join('\n');
+}
+
+/** 新版客户端的部分文本消息整段包在 `<p>…</p>` 里 (例如引用回复), 去掉段落标签. */
+export function stripParagraphTags(text: string): string {
+  if (!/^\s*<p>[\s\S]*<\/p>\s*$/.test(text)) return text;
+  return text.replace(/<\/p>\s*<p>/g, '\n').replace(/^\s*<p>/, '').replace(/<\/p>\s*$/, '').trim();
+}
+
 function toRawEvent(message: RawLarkMessage, senderOpenId: string | undefined): RawMessageEvent {
   return {
     sender: { sender_id: { open_id: senderOpenId } },
@@ -96,8 +131,11 @@ export async function parseInboundMessage(message: RawLarkMessage, opts: ParseIn
     stripBotMentions: true,
     fetchSubMessages: opts.fetchSubMessages,
   });
+  let text = normalized.content;
+  if (msgType === 'text') text = stripParagraphTags(text);
+  if (msgType === 'interactive' && (!text.trim() || text.trim() === INTERACTIVE_PLACEHOLDER)) text = interactiveText(content) || text;
   return {
-    text: normalized.content,
+    text,
     msgType,
     resources: normalized.resources,
     parentId,

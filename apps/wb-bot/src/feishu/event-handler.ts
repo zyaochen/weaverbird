@@ -3,6 +3,7 @@ import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import type { AgentAdapter, AgentRegistry, AgentRun, ConsentLevel } from '../../../../packages/core/src/index.js';
 import { CODEX_PASSTHROUGH_KEYS } from '../../../../packages/core/src/index.js';
+import { CLAUDE_PARTIAL_MESSAGES_FLAG } from '../../../../packages/core/src/agent/claude-code.js';
 import {
   resolveDataDir,
   runDir as resolveRunDir,
@@ -25,7 +26,7 @@ import { CardPipeline } from './card-pipeline.js';
 import { validateCwd } from '../security/cwd-guard.js';
 import { replayEventsFromNdjson } from '../../../../packages/core/src/runner/event-replay.js';
 import { EventsFileReader } from './events-file-reader.js';
-import { readEventsSync, extractLatestContinuationToken } from './events-file-reader.js';
+import { readEventsSync, extractLatestContinuationToken, runnerEventMapper } from './events-file-reader.js';
 import { spawnWbRunner, generateRunId, buildRunSpec } from './wb-runner-spawner.js';
 import { buildFilteredEnv } from '../security/env-whitelist.js';
 import { buildApprovalHookEnv } from '../approval-gate/hook-env.js';
@@ -65,6 +66,8 @@ import {
   MuteRegistry,
   defaultMuteRegistryPath,
 } from '../../../../packages/core/src/reverse-channel/index.js';
+import { errorSerializers } from './log-redact.js';
+import { feishuErrorCode } from './card-transport.js';
 
 const PREFERRED_AGENT_ORDER = ['claude-code', 'codex'] as const;
 const STALE_SELF_HEAL_MAX_ATTEMPTS = 1;
@@ -193,7 +196,7 @@ export function buildAgentArgs(
 ): string[] {
   void cwd;
   if (agentId === 'claude-code') {
-    const args = ['--print', '--output-format', 'stream-json', '--verbose'];
+    const args = ['--print', '--output-format', 'stream-json', '--verbose', CLAUDE_PARTIAL_MESSAGES_FLAG];
     if (continuationToken) args.push('--resume', continuationToken);
     const claudeModel = process.env['ANTHROPIC_MODEL'];
     if (claudeModel) args.push('--model', claudeModel);
@@ -415,7 +418,9 @@ type CommandReceived = {
 
 type CaptainEndReason = 'succeeded' | 'failed' | 'cancelled' | 'preempted';
 
-const logger = pino({ level: process.env['LOG_LEVEL'] ?? 'info' });
+const logger = pino({ level: process.env['LOG_LEVEL'] ?? 'info', serializers: errorSerializers });
+/** 回复 / 引用的消息已被撤回. */
+const MESSAGE_WITHDRAWN = 230011;
 
 function summarizeState(state: StreamState): Record<string, unknown> {
   return {
@@ -531,6 +536,8 @@ export class EventHandler {
   private mediaCache: MediaCache | null = null;
   private readonly ackReactions: AckReactions;
   private readonly followUps = new Map<string, FollowUp[]>();
+  /** 已进入 startAgentRun、session 还没注册的 scope; 值是起跑标记, 防止前一轮的收尾误清后一轮. */
+  private readonly startingScopes = new Map<string, symbol>();
   private readonly mergedAckIds = new Map<string, string[]>();
   /** 结束卡按钮要用: 最近处理过的原始消息 (重试) 与运行卡 → 发起上下文 (校验发起人 / 定位 scope). */
   private readonly recentInputs = new Map<string, MessageEvent>();
@@ -1042,7 +1049,11 @@ export class EventHandler {
         ? (this.registry.lookup(binding.agentId) ?? await resolveDefaultAgent(this.registry))
         : await resolveDefaultAgent(this.registry);
     }
-    if (!agent) return;
+    if (!agent) {
+      logger.warn({ messageId: event.messageId, agents: this.registry.list().map((a) => a.id) }, 'no available agent');
+      await this.replySystemCard(event.messageId, '❌ 没有可用的 agent: 检测不到 claude / codex 命令。检查 `WB_CLAUDE_COMMAND` / `WB_CODEX_COMMAND` 指向的命令是否在 PATH 上。');
+      return;
+    }
 
     // Now that agent is resolved, compute scopeKey (C1: contains agentId)
     const scopeKey = this.scopeKey(event.userOpenId, event.threadId, agent.id);
@@ -1154,8 +1165,9 @@ export class EventHandler {
       forcedRunId = decision.run_id;
     } else {
       // C3: busy check per (user, thread, agent). 进行中就排队, 本轮结束后合并成下一轮.
-      if (this.activeSessions.has(scopeKey)) {
-        await this.enqueueFollowUp(this.activeSessions.get(scopeKey)!, {
+      // 起跑中 (卡片还在创建、session 还没注册) 和等待接续排队消息的 scope 同样算忙, 否则会并发起两轮.
+      if (this.activeSessions.has(scopeKey) || this.startingScopes.has(scopeKey) || this.followUps.has(scopeKey)) {
+        await this.enqueueFollowUp(scopeKey, {
           event: { ...event, ...inputExtras, text: promptText },
           agent,
           cwd,
@@ -1178,43 +1190,78 @@ export class EventHandler {
     isAgentOverride: boolean,
     forcedRunId?: string,
   ): Promise<void> {
-    this.ackReactions.add(effectiveEvent.messageId);
-    if (effectiveEvent.mergedMessageIds && effectiveEvent.mergedMessageIds.length > 0) {
-      this.mergedAckIds.set(effectiveEvent.messageId, effectiveEvent.mergedMessageIds);
-    }
-    const replyMessageId = await this.feishu.replyCard(effectiveEvent.messageId, renderCard(createInitialState(agent.id, agent.displayName, agent.displayName)));
-    rememberBounded(this.runCards, replyMessageId, {
-      sourceMessageId: effectiveEvent.messageId,
-      userOpenId: effectiveEvent.userOpenId,
-      threadId: effectiveEvent.threadId,
-      agentId: agent.id,
-      cwd,
-    });
+    const startToken = Symbol(scopeKey);
+    this.startingScopes.set(scopeKey, startToken);
+    try {
+      this.ackReactions.add(effectiveEvent.messageId);
+      if (effectiveEvent.mergedMessageIds && effectiveEvent.mergedMessageIds.length > 0) {
+        this.mergedAckIds.set(effectiveEvent.messageId, effectiveEvent.mergedMessageIds);
+      }
+      const replyMessageId = await this.feishu.replyCard(effectiveEvent.messageId, renderCard(createInitialState(agent.id, agent.displayName, agent.displayName)));
+      rememberBounded(this.runCards, replyMessageId, {
+        sourceMessageId: effectiveEvent.messageId,
+        userOpenId: effectiveEvent.userOpenId,
+        threadId: effectiveEvent.threadId,
+        agentId: agent.id,
+        cwd,
+      });
 
-    if (this.runnerConfig) {
-      await this.handleMessageViaWbRunner(effectiveEvent, agent, cwd, replyMessageId, scopeKey, isAgentOverride, forcedRunId);
-    } else {
-      await this.handleMessageViaPipe(effectiveEvent, agent, cwd, replyMessageId, scopeKey, isAgentOverride, forcedRunId);
+      if (this.runnerConfig) {
+        await this.handleMessageViaWbRunner(effectiveEvent, agent, cwd, replyMessageId, scopeKey, isAgentOverride, forcedRunId);
+      } else {
+        await this.handleMessageViaPipe(effectiveEvent, agent, cwd, replyMessageId, scopeKey, isAgentOverride, forcedRunId);
+      }
+    } catch (error) {
+      // 起跑就失败 (没注册 session, 不会走 cleanupSession): 起跑窗口里排进来的消息要接着处理, 不能一直挂着.
+      if (!this.activeSessions.has(scopeKey) && this.followUps.has(scopeKey)) {
+        setImmediate(() => {
+          this.drainFollowUps(scopeKey).catch((drainError: unknown) => logger.error({ scopeKey, error: drainError }, 'follow-up drain failed'));
+        });
+      }
+      throw error;
+    } finally {
+      // 排队消息的下一轮可能已经在本调用返回前起跑, 只清自己设的标记.
+      if (this.startingScopes.get(scopeKey) === startToken) this.startingScopes.delete(scopeKey);
     }
   }
 
-  private async enqueueFollowUp(activeSession: ActiveSession, item: FollowUp): Promise<void> {
-    const queue = this.followUps.get(activeSession.scopeKey) ?? [];
+  /** 注册运行中的 session, 并接上起跑窗口里已经排进来的消息 (排队数 + 排队提示卡). */
+  private registerSession(scopeKey: string, session: ActiveSession): void {
+    this.activeSessions.set(scopeKey, session);
+    const queue = this.followUps.get(scopeKey);
+    if (!queue || queue.length === 0) return;
+    session.state = { ...session.state, queuedCount: queue.length };
+    for (const item of queue) {
+      if (!item.noticeMessageId) continue;
+      session.extraMessageIds.push(item.noticeMessageId);
+      this.activeSessionsByMessageId.set(item.noticeMessageId, session);
+    }
+  }
+
+  private async enqueueFollowUp(scopeKey: string, item: FollowUp): Promise<void> {
+    const queue = this.followUps.get(scopeKey) ?? [];
     queue.push(item);
-    this.followUps.set(activeSession.scopeKey, queue);
+    this.followUps.set(scopeKey, queue);
     this.ackReactions.add(item.event.messageId);
-    activeSession.state = { ...activeSession.state, queuedCount: queue.length };
-    void activeSession.pipeline.flush(renderCard(activeSession.state));
+    // 起跑中还没有 session: 运行卡上的排队数在 session 注册时补上.
+    const activeSession = this.activeSessions.get(scopeKey);
+    if (activeSession) {
+      activeSession.state = { ...activeSession.state, queuedCount: queue.length };
+      void activeSession.pipeline.flush(renderCard(activeSession.state));
+    }
     const noticeId = await this.feishu.replyCard(item.event.messageId, renderCard({
       ...createInitialState('system', 'Weaverbird', 'bot'),
-      text: `⏳ ${activeSession.agentId} 正在处理上一条, 这条已排队 (第 ${queue.length} 条), 结束后自动接着处理`,
+      text: `⏳ ${item.agent.id} 正在处理上一条, 这条已排队 (第 ${queue.length} 条), 结束后自动接着处理`,
       includeMeta: false,
       stopState: 'running',
       terminalState: 'running',
     }));
     item.noticeMessageId = noticeId;
-    activeSession.extraMessageIds.push(noticeId);
-    this.activeSessionsByMessageId.set(noticeId, activeSession);
+    const current = this.activeSessions.get(scopeKey);
+    if (current) {
+      current.extraMessageIds.push(noticeId);
+      this.activeSessionsByMessageId.set(noticeId, current);
+    }
   }
 
   /**
@@ -1275,8 +1322,6 @@ export class EventHandler {
       for (const item of queue) void this.ackReactions.clear(item.event.messageId);
       return;
     }
-    const last = queue[queue.length - 1]!;
-    const merged = mergeMessageEvents(queue.map((item) => item.event));
     for (const noticeId of notices) {
       void this.feishu.updateCard(noticeId, renderCard({
         ...createInitialState('system', 'Weaverbird', 'bot'),
@@ -1285,7 +1330,29 @@ export class EventHandler {
         terminalState: 'done',
       })).catch((error: unknown) => logger.warn({ noticeId, error }, 'follow-up notice update failed'));
     }
-    await this.startAgentRun(merged, last.agent, last.cwd, scopeKey, last.isAgentOverride);
+    // 运行卡回复在最后一条上. 它已被撤回 (没订阅撤回事件, 或事件晚到) 时回复会报 230011:
+    // 去掉这条, 用剩下的重来.
+    let items = queue;
+    while (items.length > 0) {
+      const last = items[items.length - 1]!;
+      try {
+        await this.startAgentRun(mergeMessageEvents(items.map((item) => item.event)), last.agent, last.cwd, scopeKey, last.isAgentOverride);
+        return;
+      } catch (error) {
+        if (feishuErrorCode(error) !== MESSAGE_WITHDRAWN) throw error;
+        logger.info({ scopeKey, messageId: last.event.messageId }, 'queued message was withdrawn before its turn, skipping');
+        void this.ackReactions.clear(last.event.messageId);
+        if (last.noticeMessageId) {
+          void this.feishu.updateCard(last.noticeMessageId, renderCard({
+            ...createInitialState('system', 'Weaverbird', 'bot'),
+            text: '↩️ 消息已撤回, 不再处理',
+            includeMeta: false,
+            terminalState: 'done',
+          })).catch((noticeError: unknown) => logger.warn({ noticeId: last.noticeMessageId, error: noticeError }, 'follow-up notice update failed'));
+        }
+        items = items.slice(0, -1);
+      }
+    }
   }
 
   private async handleMessageViaWbRunner(
@@ -1477,7 +1544,7 @@ export class EventHandler {
       adminCancelEnabled: captainEnabled,
       ...(event.notices && event.notices.length > 0 ? { notices: event.notices } : {}),
     };
-    const eventsReader = new EventsFileReader(join(runDir, 'events.ndjson'));
+    const eventsReader = new EventsFileReader(join(runDir, 'events.ndjson'), 0, runnerEventMapper(agent.id, { cwd, model: codexModel }));
     const activeSession: ActiveSession = {
       scopeKey,
       threadId: event.threadId,
@@ -1494,7 +1561,7 @@ export class EventHandler {
       agentId: agent.id,
       sessionId,
     };
-    this.activeSessions.set(scopeKey, activeSession);
+    this.registerSession(scopeKey, activeSession);
     this.activeSessionsByMessageId.set(event.messageId, activeSession);
     this.activeSessionsByMessageId.set(replyMessageId, activeSession);
     this.activeSessionsByShortId.set(shortId, activeSession);
@@ -1514,18 +1581,24 @@ export class EventHandler {
       const outputErrPath = join(runDir, 'output.err');
       let stdoutOffset = 0;
       let stderrOffset = 0;
+      let lastLogReadAt = 0;
       for await (const output of eventsReader.events()) {
-        try {
-          const stdoutRaw = readFileSync(outputLogPath, 'utf8');
-          const stderrRaw = readFileSync(outputErrPath, 'utf8');
-          const nextStdout = stdoutRaw.slice(stdoutOffset);
-          const nextStderr = stderrRaw.slice(stderrOffset);
-          if (nextStdout) observability.onStdout(nextStdout);
-          if (nextStderr) observability.onStderr(nextStderr);
-          stdoutOffset = stdoutRaw.length;
-          stderrOffset = stderrRaw.length;
-        } catch {
-          // logs may not exist yet
+        // 流式下每个 delta 都是一个事件, 每次整读 output.log 会退化成 O(n²); 节流到 1s, 终态必读.
+        const isTerminal = output.type === 'done' || output.type === 'error';
+        if (isTerminal || Date.now() - lastLogReadAt >= 1000) {
+          lastLogReadAt = Date.now();
+          try {
+            const stdoutRaw = readFileSync(outputLogPath, 'utf8');
+            const stderrRaw = readFileSync(outputErrPath, 'utf8');
+            const nextStdout = stdoutRaw.slice(stdoutOffset);
+            const nextStderr = stderrRaw.slice(stderrOffset);
+            if (nextStdout) observability.onStdout(nextStdout);
+            if (nextStderr) observability.onStderr(nextStderr);
+            stdoutOffset = stdoutRaw.length;
+            stderrOffset = stderrRaw.length;
+          } catch {
+            // logs may not exist yet
+          }
         }
         state = reduceStreamState(activeSession.state, output);
         activeSession.state = state;
@@ -1651,7 +1724,7 @@ export class EventHandler {
       agentId: agent.id,
       sessionId: captainEnabled ? sessionId : undefined,
     };
-    this.activeSessions.set(scopeKey, activeSession);
+    this.registerSession(scopeKey, activeSession);
     this.activeSessionsByMessageId.set(event.messageId, activeSession);
     this.activeSessionsByMessageId.set(replyMessageId, activeSession);
     if (shortId) this.activeSessionsByShortId.set(shortId, activeSession);
@@ -2390,8 +2463,13 @@ export class EventHandler {
 
   async handleCardAction(event: CardActionEvent): Promise<Record<string, unknown>> {
     // Use messageId+action as dedup key when eventId is empty (Feishu omits it for card callbacks).
-    const dedupKey = event.eventId || `card-action:${event.messageId}:${event.action}`;
-    if (this.isDuplicate(dedupKey)) return { toast: { type: 'info', content: 'duplicate' } };
+    // 同一张卡上的多个「发送」按钮 action 相同, 要带上序号, 否则第二个文件会被当成重复点击.
+    const artifactSuffix = event.artifactIndex === undefined ? '' : `:${event.artifactIndex}`;
+    const dedupKey = event.eventId || `card-action:${event.messageId}:${event.action}${artifactSuffix}`;
+    if (this.isDuplicate(dedupKey)) {
+      logger.info({ dedupKey, action: event.action }, 'duplicate card action ignored');
+      return { toast: { type: 'info', content: 'duplicate' } };
+    }
     // M13-H: 未知 action 提前动手, 给用户真话不是 "duplicate".
     const KNOWN_ACTIONS = new Set(['stop', 'admin_cancel', 'approval_gate_approve', 'approval_gate_deny', 'approval_gate_transfer', 'watchdog_retry', 'watchdog_dismiss', SEND_ARTIFACT_ACTION, ...Object.values(RUN_FOLLOW_UP_ACTIONS)]);
     if (!KNOWN_ACTIONS.has(event.action)) {
@@ -2606,10 +2684,13 @@ export class EventHandler {
 
           let agentId: string | undefined = card.agentId;
           let displayName: string | undefined;
+          let runStartedAt: number | undefined;
           try {
             const specRaw = readFileSync(runSpecPath(dataDir, card.runId, botId), 'utf8');
             const spec = JSON.parse(specRaw) as Record<string, unknown>;
             agentId = (spec['agentId'] as string) ?? agentId;
+            const specStartedAt = typeof spec['startedAt'] === 'string' ? Date.parse(spec['startedAt']) : Number.NaN;
+            if (Number.isFinite(specStartedAt)) runStartedAt = specStartedAt;
             const agent = agentId ? this.registry.lookup(agentId) : null;
             displayName = agent?.displayName;
           } catch { /* spec.json may not exist */ }
@@ -2623,7 +2704,9 @@ export class EventHandler {
               const agent = agentId ? this.registry.lookup(agentId) : null;
               const caps = agent ? await agent.getCapabilities() : null;
               if (caps?.tokenRotation === 'rotating' && agentId) {
-                const historicalEvents = readEventsSync(runEventsPath(dataDir, card.runId, botId));
+                const mapEvent = runnerEventMapper(agentId, { cwd: dataDir });
+                const historicalEvents = readEventsSync(runEventsPath(dataDir, card.runId, botId))
+                  .flatMap((raw) => mapEvent(raw) as unknown as Array<Record<string, unknown>>);
                 const latestToken = extractLatestContinuationToken(historicalEvents);
                 if (latestToken) {
                   this.store.upsertContinuation(this.botId, card.userOpenId, card.threadId, agentId, latestToken);
@@ -2634,7 +2717,7 @@ export class EventHandler {
                   }, 'F6 backfill: updated store with latest continuationToken from events.ndjson');
                 }
               }
-              this.reattachEventsStream(card, runDir, agentId);
+              this.reattachEventsStream(card, runDir, agentId, runStartedAt);
             }
           } else {
             const gate = this.reserveStaleSelfHeal(card);
@@ -2678,9 +2761,14 @@ export class EventHandler {
     }
   }
 
-  private reattachEventsStream(card: { userOpenId: string; threadId: string; runId?: string | null; replyMessageId: string }, runDir: string, agentId?: string): void {
+  private reattachEventsStream(
+    card: { userOpenId: string; threadId: string; runId?: string | null; replyMessageId: string },
+    runDir: string,
+    agentId?: string,
+    runStartedAt?: number,
+  ): void {
     const ndjsonPath = join(runDir, 'events.ndjson');
-    const eventsReader = new EventsFileReader(ndjsonPath);
+    const eventsReader = new EventsFileReader(ndjsonPath, 0, runnerEventMapper(agentId, { cwd: runDir }));
     const scopeKey = this.scopeKey(card.userOpenId, card.threadId, agentId ?? 'system');
     const pipeline = new CardPipeline((c) => this.feishu.updateCard(card.replyMessageId, c), {
       logger,
@@ -2688,7 +2776,12 @@ export class EventHandler {
       minIntervalMs: this.cardIntervalMs(card.replyMessageId),
     });
     const agent = agentId ? this.registry.lookup(agentId) : null;
-    const state = createInitialState(agentId ?? 'system', agent?.displayName ?? 'Weaverbird', agent?.displayName ?? 'Weaverbird');
+    // 耗时和完成推送门槛按 run 真正的开始时间算, 不从 bot 重启那一刻重新计.
+    const startedAt = runStartedAt ?? Date.now();
+    const state = {
+      ...createInitialState(agentId ?? 'system', agent?.displayName ?? 'Weaverbird', agent?.displayName ?? 'Weaverbird'),
+      startedAt,
+    };
     const activeSession: ActiveSession = {
       scopeKey,
       threadId: card.threadId,
@@ -2701,7 +2794,7 @@ export class EventHandler {
       state,
       extraMessageIds: [],
       eventsReader,
-      startedAt: Date.now(),
+      startedAt,
       agentId: agentId ?? 'system',
       sessionId: this.sessionIdFor(card.userOpenId, card.threadId),
     };

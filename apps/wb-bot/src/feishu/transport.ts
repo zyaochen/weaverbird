@@ -36,6 +36,7 @@ import { CaptainService, createCaptainConcurrencyContainer, createCaptainSession
 import { ConcurrencyQueueEntryStatus } from '../../../../packages/core/src/captain/concurrency-queue-store.js';
 import { IpcServer } from '../../../../packages/core/src/reverse-channel/index.js';
 import { wireUpReverseChannel } from '../server/wire-up.js';
+import { errorSerializers } from './log-redact.js';
 
 /**
  * 决定 wb-runner main path. 优先 build dist (.js · 走原生 node 跑); 没 build 就
@@ -132,7 +133,7 @@ export function parseLarkCardActionPayload(data: unknown): LarkCardActionPayload
   return CardActionSchema.parse(data);
 }
 
-const logger = pino({ level: process.env['LOG_LEVEL'] ?? 'info' });
+const logger = pino({ level: process.env['LOG_LEVEL'] ?? 'info', serializers: errorSerializers });
 class BoundedSet {
   private readonly items = new Set<string>();
   constructor(private readonly limit: number) {}
@@ -697,6 +698,10 @@ export async function startTransport(
         });
       });
     },
+    // 应用订阅了这些事件 (Typing 回执自己也会触发 reaction 事件), 不处理; 注册空 handler 免得 SDK 每次打 warn.
+    'im.message.reaction.created_v1': async () => {},
+    'im.message.reaction.deleted_v1': async () => {},
+    'im.message.message_read_v1': async () => {},
     'im.message.recalled_v1': async (data: unknown) => {
       wsStatus.lastEventAt = Date.now();
       const messageId = readRecalledMessageId(data);

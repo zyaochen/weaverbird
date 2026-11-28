@@ -68,6 +68,24 @@ describe('parseInboundMessage', () => {
     expect(parsed.parentId).toBe('om_parent');
   });
 
+  it('drops the <p> wrapper some clients put around text messages', async () => {
+    const parsed = await parseInboundMessage(message('text', { text: '<p>@_user_1 他们在讨论什么</p>' }, {
+      mentions: [{ key: '@_user_1', name: 'wb', id: { open_id: BOT } }],
+    }), { botOpenId: BOT });
+    expect(parsed.text).toBe('他们在讨论什么');
+  });
+
+  it('reads title and text of a forwarded interactive card instead of the SDK placeholder', async () => {
+    const parsed = await parseInboundMessage(message('interactive', {
+      title: '【告警】【已恢复】机器SSH访问异常',
+      elements: [
+        [{ tag: 'img', image_key: 'img_1' }, { tag: 'text', text: '事故时间: 17:31 - 18:18' }],
+        [{ tag: 'text', text: '【 事故概述 】' }, { tag: 'a', href: 'https://example.com/incident/1', text: '详情' }],
+      ],
+    }), { botOpenId: BOT });
+    expect(parsed.text).toBe('【告警】【已恢复】机器SSH访问异常\n事故时间: 17:31 - 18:18\n【 事故概述 】详情 (https://example.com/incident/1)');
+  });
+
   it('falls back to legacy text parsing when message_type is absent', async () => {
     const parsed = await parseInboundMessage({ content: '{"text":"hello"}' }, { botOpenId: BOT });
     expect(parsed).toEqual({ text: 'hello', msgType: 'text', resources: [], parentId: undefined, mentionAll: false });

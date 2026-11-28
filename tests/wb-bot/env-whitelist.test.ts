@@ -166,6 +166,22 @@ describe('env whitelist', () => {
     expect(await registry.isAvailable('codex')).toBe(true);
   });
 
+  it('splits agent commands written with arguments (as in .env.example)', async () => {
+    const registry = createBotAgentRegistry({ dataDir: '/tmp/wb-bot', claudeCommand: '/bin/sh --model gpt-5.4', codexCommand: '/bin/sh -c model=gpt-5.3-codex' });
+    expect(await registry.isAvailable('claude-code')).toBe(true);
+    expect(await registry.isAvailable('codex')).toBe(true);
+
+    type SpecAgent = { buildProcessSpec(req: { prompt: string; model?: string }): { command: string; args: string[] } };
+    const claude = (registry.lookup('claude-code') as unknown as SpecAgent).buildProcessSpec({ prompt: 'hello' });
+    expect(claude.command).toBe('/bin/sh');
+    expect(claude.args.filter((arg) => arg === '--model')).toHaveLength(1);
+    expect(claude.args[claude.args.indexOf('--model') + 1]).toBe('gpt-5.4');
+
+    const codex = (registry.lookup('codex') as unknown as SpecAgent).buildProcessSpec({ prompt: 'hello' });
+    expect(codex.command).toBe('/bin/sh');
+    expect(codex.args.slice(0, 2)).toEqual(['-c', 'model=gpt-5.3-codex']);
+  });
+
   it('returns false for agent probing when spawnSync times out (simulated with non-existing command)', async () => {
     const registry = createBotAgentRegistry({ dataDir: '/tmp/wb-bot', claudeCommand: 'no-such-command-xyz', codexCommand: 'no-such-codex-xyz' });
     expect(await registry.isAvailable('claude-code')).toBe(false);

@@ -319,7 +319,9 @@ function renderStaticCard(state: StreamState): Record<string, unknown> {
   const chunks = answerChunks(state);
   if (chunks.length > 0) sections.push({ tag: 'markdown', content: truncate(chunks[0]!, MAIN_TEXT_MAX) });
   if (chunks.length > 1) sections.push({ tag: 'markdown', content: `📄 输出较长, 共 ${chunks.length} 张卡, 后续见下方「续」卡`, text_size: 'notation' });
-  if (state.errorMessage) sections.push({ tag: 'markdown', content: `**Error**\n${truncate(state.errorMessage, 2000)}` });
+  // claude 遇到 API 错误时会把同一句错误也作为正文输出, 正文已经以它结尾就不再重复一遍.
+  const errorMessage = state.errorMessage?.trim();
+  if (errorMessage && !text.endsWith(errorMessage)) sections.push({ tag: 'markdown', content: `**Error**\n${truncate(errorMessage, 2000)}` });
   if (state.includeMeta) {
     const meta = [
       `agent: ${state.agentId}`,

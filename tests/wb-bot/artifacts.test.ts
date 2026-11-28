@@ -43,6 +43,20 @@ describe('findArtifacts', () => {
     expect(artifactLabel(found[0]!, cwd)).toBe('out/plot.png');
   });
 
+  it('picks up bare file names in code spans when the files were made by a shell command', () => {
+    const startedAt = Date.now();
+    writeFileSync(join(cwd, 'chart.png'), 'png');
+    writeFileSync(join(cwd, 'out', 'report.md'), '# r');
+    writeFileSync(join(dir, 'secret.txt'), 'x');
+    const found = findArtifacts({
+      cwd,
+      startedAt,
+      tools: [{ id: '1', name: 'Bash', input: { command: 'python3 gen.py' }, output: 'created chart.png' }],
+      text: '已生成:\n- `chart.png`\n- `out/report.md`\n没提到的 `missing.png`、`../secret.txt` 和普通文字 chart.png 不算',
+    });
+    expect(found).toEqual([join(cwd, 'chart.png'), join(cwd, 'out', 'report.md')]);
+  });
+
   it('skips empty files and returns nothing without cwd', () => {
     writeFileSync(join(cwd, 'empty.txt'), '');
     expect(findArtifacts({ cwd, startedAt: 0, tools: [], text: `${cwd}/empty.txt` })).toEqual([]);
@@ -103,6 +117,54 @@ describe('artifact send-back button', () => {
       expect(await click('u1', 'x2')).toEqual({ toast: { type: 'success', content: '正在发送 chart.png' } });
       await vi.waitFor(() => expect(sendLocalFile).toHaveBeenCalledWith('om_1', target));
       expect(await click('u1', 'x3')).toEqual({ toast: { type: 'info', content: '已经发送过了' } });
+    } finally {
+      handler.dispose();
+      store.close();
+    }
+  });
+
+  it('sends each artifact on the same card even though Feishu card callbacks carry no event id', async () => {
+    const store = new BindingStore(join(dir, 'wb-bot.db'));
+    store.setCurrentCwd('default', 'u1', 't1', cwd);
+    const chart = join(cwd, 'chart.png');
+    const report = join(cwd, 'report.md');
+    const agent: AgentAdapter = {
+      id: 'codex',
+      displayName: 'Codex',
+      async isAvailable() { return true; },
+      async getCapabilities() { return {} as never; },
+      run(): AgentRun {
+        return {
+          events: {
+            async *[Symbol.asyncIterator]() {
+              writeFileSync(chart, 'png-bytes');
+              writeFileSync(report, '# report');
+              yield { type: 'text' as const, delta: '生成了 `chart.png` 和 `report.md`' };
+              yield { type: 'done' as const };
+            },
+          },
+          async stop() {},
+          async waitForExit() { return true; },
+        };
+      },
+    };
+    const updates: Array<Record<string, unknown>> = [];
+    const sendLocalFile = vi.fn(async () => {});
+    const handler = new EventHandler(new DefaultAgentRegistry([{ agent, command: 'codex' }]), store, {
+      async replyCard() { return 'card-1'; },
+      async updateCard(_id, card) { updates.push(card); },
+      async replyText() { return 'text-1'; },
+      sendLocalFile,
+    }, cwd);
+    try {
+      await handler.handleMessage({ eventId: 'e1', userOpenId: 'u1', threadId: 't1', messageId: 'om_1', text: 'draw' });
+      await vi.waitFor(() => expect(JSON.stringify(updates.at(-1))).toContain('发送 report.md'));
+      const click = (artifactIndex: number) =>
+        handler.handleCardAction({ eventId: '', userOpenId: 'u1', threadId: 'chat', messageId: 'card-1', action: 'send_artifact', artifactIndex });
+      expect(await click(0)).toEqual({ toast: { type: 'success', content: '正在发送 chart.png' } });
+      expect(await click(1)).toEqual({ toast: { type: 'success', content: '正在发送 report.md' } });
+      await vi.waitFor(() => expect(sendLocalFile).toHaveBeenCalledTimes(2));
+      expect(sendLocalFile).toHaveBeenCalledWith('om_1', report);
     } finally {
       handler.dispose();
       store.close();

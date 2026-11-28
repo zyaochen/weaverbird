@@ -111,9 +111,12 @@ function mapItemEvent(eventType: string, payload: JSONRecord): AgentEvent[] {
       isError: status === 'failed' || (typeof exitCode === 'number' && exitCode !== 0),
     }];
   }
-  if (eventType === 'item.completed' && itemType === 'error') {
-    const message = readString(item['message']) ?? 'codex exec failed';
-    return [{ type: 'error', message, code: inferErrorCode(message), recoverable: inferRecoverable(message) }];
+  // item 级 error 是 codex 的非致命告警 (模型元数据缺失、skill 描述被截断等), run 会照常继续;
+  // 当成 error 会让卡片提前进入失败态. 致命错误走顶层 error / turn.failed.
+  if (eventType === 'item.completed' && itemType === 'error') return [];
+  if (eventType === 'item.completed' && itemType === 'agent_message') {
+    const text = readString(item['text']) ?? joinTextParts(item['content']);
+    return text ? [{ type: 'text', delta: text }] : [];
   }
   return [];
 }

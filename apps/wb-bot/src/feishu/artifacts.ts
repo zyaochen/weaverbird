@@ -14,6 +14,8 @@ const MTIME_SLACK_MS = 2_000;
 const PATH_KEYS = ['file_path', 'path', 'filename', 'output_path', 'target_file'];
 // 文本里的绝对路径或 ./ 开头的相对路径, 要求带扩展名, 免得把目录当成产物.
 const TEXT_PATH_RE = /(?:^|[\s`'"(（])((?:\/|\.\/)[^\s`'"()<>（）]+\.[A-Za-z0-9]{1,8})(?=$|[\s`'"),.;:!?)）。，；：])/gm;
+// agent 用 Bash 生成文件时常只在正文里写 `chart.png` 这样的裸文件名; 只认反引号里的, 仍须在 cwd 内且本轮新生成.
+const CODE_SPAN_PATH_RE = /`([^`\s/][^`\s]*\.[A-Za-z0-9]{1,8})`/g;
 
 function toolPaths(tools: readonly ToolEntry[]): string[] {
   const paths: string[] = [];
@@ -28,7 +30,7 @@ function toolPaths(tools: readonly ToolEntry[]): string[] {
 }
 
 function textPaths(text: string): string[] {
-  return [...text.matchAll(TEXT_PATH_RE)].map((match) => match[1]!);
+  return [...text.matchAll(TEXT_PATH_RE), ...text.matchAll(CODE_SPAN_PATH_RE)].map((match) => match[1]!);
 }
 
 function realCwd(cwd: string): string | null {

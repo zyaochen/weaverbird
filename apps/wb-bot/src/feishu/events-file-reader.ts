@@ -1,9 +1,35 @@
 import { existsSync, readFileSync, statSync, createReadStream } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { EventEmitter } from 'node:events';
-import type { AgentEvent } from '../../../../packages/core/src/agent/types.js';
+import type { AgentEvent, RunRequest } from '../../../../packages/core/src/agent/types.js';
+import { createClaudeStreamMapper } from '../../../../packages/core/src/agent/claude-code.js';
+import { mapCodexStreamEvent } from '../../../../packages/core/src/agent/codex.js';
 
 export const EVENTS_SUPPORTED_SCHEMA_VERSION = 1;
+
+export type EventMapper = (raw: Record<string, unknown>) => AgentEvent[];
+
+/** wb-runner 自己补写的终态行, 以及已经是 AgentEvent 形状的行. */
+const AGENT_EVENT_TYPES = new Set(['text', 'thinking', 'tool_use', 'tool_result', 'usage', 'done']);
+
+/**
+ * wb-runner 把 agent CLI 的原始 stdout (claude stream-json / codex exec --json) 逐行写进
+ * events.ndjson, 只有终态 done / error 是它自己补的 AgentEvent. 读的一侧按 agent 翻译成
+ * AgentEvent, 否则正文 / 思考 / 工具 / 用量 / continuationToken 都到不了卡片和绑定.
+ */
+export function runnerEventMapper(agentId: string | undefined, req: Pick<RunRequest, 'cwd' | 'model'>): EventMapper {
+  const mapClaude = createClaudeStreamMapper();
+  return (raw) => {
+    const type = typeof raw['type'] === 'string' ? raw['type'] : '';
+    if (AGENT_EVENT_TYPES.has(type)) return [raw as unknown as AgentEvent];
+    if (agentId === 'claude-code') {
+      // claude 原始流没有顶层 error, 这里的 error 只可能是 wb-runner 补的.
+      return type === 'error' ? [raw as unknown as AgentEvent] : mapClaude(raw);
+    }
+    if (agentId === 'codex') return mapCodexStreamEvent(raw, { prompt: '', ...req });
+    return [raw as unknown as AgentEvent];
+  };
+}
 
 export function extractLatestContinuationToken(events: Array<Record<string, unknown>>): string | undefined {
   for (let i = events.length - 1; i >= 0; i--) {
@@ -61,7 +87,7 @@ export class EventsFileReader extends EventEmitter {
   private timer: ReturnType<typeof setInterval> | null = null;
   private closed = false;
 
-  constructor(private readonly ndjsonPath: string, startOffset = 0) {
+  constructor(private readonly ndjsonPath: string, startOffset = 0, private readonly mapEvent?: EventMapper) {
     super();
     this.offset = startOffset;
   }
@@ -91,7 +117,8 @@ export class EventsFileReader extends EventEmitter {
         try {
           const parsed = JSON.parse(line) as AgentEvent;
           if (typeof parsed === 'object' && parsed !== null && parsed.type) {
-            this.emit('event', parsed);
+            const events = this.mapEvent ? this.mapEvent(parsed as unknown as Record<string, unknown>) : [parsed];
+            for (const event of events) this.emit('event', event);
           }
         } catch {
           // skip non-JSON lines

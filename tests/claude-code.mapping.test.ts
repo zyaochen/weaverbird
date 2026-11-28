@@ -28,6 +28,18 @@ describe('claude code mapping', () => {
     ]);
   });
 
+  it('maps a success-subtype result flagged is_error into an error event', () => {
+    expect(mapClaudeStreamEvent({
+      type: 'result',
+      subtype: 'success',
+      is_error: true,
+      result: 'Failed to authenticate. API Error: 403 model not allowed',
+      session_id: 's-1',
+    })).toEqual([
+      { type: 'error', message: 'Failed to authenticate. API Error: 403 model not allowed', code: 'auth', recoverable: false },
+    ]);
+  });
+
   it('maps consent levels to Claude permission modes', () => {
     expect(mapConsentLevelToPermissionMode('plan-only')).toBe('plan');
     expect(mapConsentLevelToPermissionMode('strict')).toBe('default');

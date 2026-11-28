@@ -148,7 +148,8 @@ export function mapClaudeStreamEvent(payload: unknown): AgentEvent[] {
     }];
   }
   if (readString(event['type']) === 'assistant' || readString(event['type']) === 'user') return mapMessage(event);
-  if (readString(event['type']) === 'result' && readString(event['subtype']) === 'success') {
+  // 鉴权 / API 错误时 claude 仍报 subtype=success, 只在 is_error 上标出失败.
+  if (readString(event['type']) === 'result' && readString(event['subtype']) === 'success' && event['is_error'] !== true) {
     const usage = asRecord(event['usage']);
     return [
       {
@@ -160,12 +161,57 @@ export function mapClaudeStreamEvent(payload: unknown): AgentEvent[] {
       { type: 'done', continuationToken: readString(event['session_id']) },
     ];
   }
-  if (readString(event['type']) === 'result' && readString(event['subtype'])?.startsWith('error')) {
+  if (readString(event['type']) === 'result' && (readString(event['subtype'])?.startsWith('error') || event['is_error'] === true)) {
     const message = readErrorMessage(event);
     const code = inferErrorCode(message);
     return [{ type: 'error', message, code, recoverable: inferRecoverable(code) }];
   }
   return [];
+}
+
+/** 让 claude 输出 stream_event 增量, 卡片才能边生成边显示; 不加时正文要等整段生成完才一次出现. */
+export const CLAUDE_PARTIAL_MESSAGES_FLAG = '--include-partial-messages';
+
+/**
+ * 带 `--include-partial-messages` 时, claude 先发 stream_event 增量 (text_delta / thinking_delta),
+ * 每个内容块结束后再发一条同 message.id 的完整 assistant 消息. 已经按增量推过的 text / thinking
+ * 不再从完整消息里重复; tool_use 等仍以完整消息为准. 子 agent (parent_tool_use_id 非空) 的增量不进正文.
+ * 有状态, 每个 run 一个.
+ */
+export function createClaudeStreamMapper(): (payload: unknown) => AgentEvent[] {
+  let streamingMessageId: string | undefined;
+  const streamedKinds = new Set<'text' | 'thinking'>();
+  return (payload) => {
+    const event = asRecord(payload);
+    if (!event) return [];
+    if (readString(event['type']) === 'stream_event') {
+      if (event['parent_tool_use_id']) return [];
+      const inner = asRecord(event['event']);
+      const innerType = readString(inner?.['type']);
+      if (innerType === 'message_start') {
+        streamingMessageId = readString(asRecord(inner?.['message'])?.['id']);
+        streamedKinds.clear();
+        return [];
+      }
+      if (innerType !== 'content_block_delta') return [];
+      const delta = asRecord(inner?.['delta']);
+      const deltaType = readString(delta?.['type']);
+      if (deltaType !== 'text_delta' && deltaType !== 'thinking_delta') return [];
+      const kind = deltaType === 'text_delta' ? 'text' : 'thinking';
+      const text = readString(delta?.[kind]) ?? '';
+      if (!text) return [];
+      if (streamingMessageId) streamedKinds.add(kind);
+      return [{ type: kind, delta: text }];
+    }
+    if (readString(event['type']) === 'assistant' && streamedKinds.size > 0) {
+      const message = asRecord(event['message']);
+      if (message && readString(message['id']) === streamingMessageId && Array.isArray(message['content'])) {
+        const content = message['content'].filter((item) => !streamedKinds.has(readString(asRecord(item)?.['type']) as 'text' | 'thinking'));
+        return mapClaudeStreamEvent({ ...event, message: { ...message, content } });
+      }
+    }
+    return mapClaudeStreamEvent(payload);
+  };
 }
 
 const TOOL_PROGRESS_DEFAULT_MS = 2000;
@@ -195,6 +241,8 @@ export class ClaudeCodeAgent extends CLISubprocessAgent {
   readonly displayName = 'Claude Code';
   private availability?: Promise<boolean>;
   private capabilities?: Promise<AgentCapabilities>;
+  /** 增量去重是有状态的, 按 run (同一个 req 对象) 各用一个. */
+  private readonly streamMappers = new WeakMap<RunRequest, (payload: unknown) => AgentEvent[]>();
 
   run(req: RunRequest): AgentRun {
     const baseRun = super.run(req);
@@ -213,15 +261,20 @@ export class ClaudeCodeAgent extends CLISubprocessAgent {
   }
 
   protected buildProcessSpec(req: RunRequest): CLIProcessSpec {
-    const args = ['--print', '--output-format', 'stream-json', '--verbose'];
+    const args = ['--print', '--output-format', 'stream-json', '--verbose', CLAUDE_PARTIAL_MESSAGES_FLAG];
     if (req.continuationToken) args.push('--resume', req.continuationToken);
     if (req.model) args.push('--model', req.model);
     args.push('--permission-mode', mapConsentLevelToPermissionMode(req.consentLevel), promptWithLocalFiles(req));
     return { command: 'claude', args, cwd: req.cwd, env: pickEnv(process.env, CLAUDE_PASSTHROUGH_KEYS) };
   }
 
-  protected mapOutput(payload: unknown): AgentEvent[] {
-    return mapClaudeStreamEvent(payload);
+  protected mapOutput(payload: unknown, req: RunRequest): AgentEvent[] {
+    let mapper = this.streamMappers.get(req);
+    if (!mapper) {
+      mapper = createClaudeStreamMapper();
+      this.streamMappers.set(req, mapper);
+    }
+    return mapper(payload);
   }
 
   private checkAvailability(): boolean {

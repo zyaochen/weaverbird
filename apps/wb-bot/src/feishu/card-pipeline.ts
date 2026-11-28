@@ -1,4 +1,5 @@
 import pino, { type Logger } from 'pino';
+import { errorSerializers } from './log-redact.js';
 
 export type PatchHandler = (card: Record<string, unknown>) => Promise<void>;
 
@@ -8,7 +9,7 @@ type CardPipelineOptions = {
   label?: string;
 };
 
-const defaultLogger = pino({ level: process.env['LOG_LEVEL'] ?? 'info' });
+const defaultLogger = pino({ level: process.env['LOG_LEVEL'] ?? 'info', serializers: errorSerializers });
 
 function extractPatchErrorDetails(error: unknown): { message: string; code?: number; detail: string } {
   const message = error instanceof Error ? error.message : String(error);
@@ -54,16 +55,16 @@ export class CardPipeline {
   async flush(card: Record<string, unknown>): Promise<void> {
     this.pending = card;
     if (this.timer) {
-      this.logger.info({ label: this.label, hasPending: true }, 'card patch already scheduled');
+      this.logger.debug({ label: this.label, hasPending: true }, 'card patch already scheduled');
       return;
     }
     // If a patch is already in-flight, just leave the payload in pending —
     // drain() will re-schedule when the current patch settles.
     if (this.isPatching) {
-      this.logger.info({ label: this.label, hasPending: true }, 'card patch in-flight, queued flush');
+      this.logger.debug({ label: this.label, hasPending: true }, 'card patch in-flight, queued flush');
       return;
     }
-    this.logger.info({ label: this.label, delayMs: this.minIntervalMs }, 'scheduled card patch flush');
+    this.logger.debug({ label: this.label, delayMs: this.minIntervalMs }, 'scheduled card patch flush');
     this.timer = setTimeout(() => {
       this.timer = null;
       void this.drain('flush-timer');
